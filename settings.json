@@ -6,12 +6,11 @@
     "type": "offline"
   },
   "server": {
-    "ip": "solocloud.host",
-    "port": 25565,
+    "ip": "oneblocksurviva-VWKW.aternos.me",
+    "port": 62776,
     "version": "1.20.1",
     "try-creative": false
   },
-  "owner": "rudegu_y",
   "position": {
     "enabled": true,
     "x": 0,
@@ -63,8 +62,7 @@
     "combat": true,
     "beds": true,
     "chat": true,
-    "console-commands": true,
-    "commander": true
+    "console-commands": true
   },
   "combat": {
     "attack-mobs": true,

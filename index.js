@@ -25,6 +25,8 @@ let botState = {
   startTime: Date.now(),
   errors: [],
   wasThrottled: false,
+  commanderBusy: false, // true while the commander module is running a task (mine/build/goto/follow) -
+                        // idle behaviors below check this so they don't hijack the pathfinder mid-task.
 };
 
 // Health check endpoint for monitoring
@@ -1489,7 +1491,7 @@ function initializeModules(bot, mcData, defaultMove) {
     // Arm swinging
     addInterval(
       () => {
-        if (!bot || !botState.connected) return;
+        if (!bot || !botState.connected || botState.commanderBusy) return;
         try {
           bot.swingArm();
         } catch (e) {}
@@ -1500,7 +1502,7 @@ function initializeModules(bot, mcData, defaultMove) {
     // Hotbar cycling
     addInterval(
       () => {
-        if (!bot || !botState.connected) return;
+        if (!bot || !botState.connected || botState.commanderBusy) return;
         try {
           const slot = Math.floor(Math.random() * 9);
           bot.setQuickBarSlot(slot);
@@ -1515,6 +1517,7 @@ function initializeModules(bot, mcData, defaultMove) {
         if (
           !bot ||
           !botState.connected ||
+          botState.commanderBusy ||
           typeof bot.setControlState !== "function"
         )
           return;
@@ -1552,6 +1555,7 @@ function initializeModules(bot, mcData, defaultMove) {
           if (
             !bot ||
             !botState.connected ||
+            botState.commanderBusy ||
             typeof bot.setControlState !== "function"
           )
             return;
@@ -1627,7 +1631,7 @@ function initializeModules(bot, mcData, defaultMove) {
     chatModule(bot);
   }
   if (config.modules.commander) {
-    commanderModule(bot, mcData, defaultMove, config, addLog);
+    commanderModule(bot, mcData, defaultMove, config, addLog, botState);
   }
 
   addLog("[Modules] All modules initialized!");
@@ -1642,7 +1646,7 @@ function startCircleWalk(bot, defaultMove) {
   let lastPathTime = 0;
 
   addInterval(() => {
-    if (!bot || !botState.connected) return;
+    if (!bot || !botState.connected || botState.commanderBusy) return;
     const now = Date.now();
     if (now - lastPathTime < 2000) return;
     lastPathTime = now;
@@ -1670,6 +1674,7 @@ function startRandomJump(bot) {
     if (
       !bot ||
       !botState.connected ||
+      botState.commanderBusy ||
       typeof bot.setControlState !== "function"
     )
       return;
@@ -1688,7 +1693,7 @@ function startRandomJump(bot) {
 
 function startLookAround(bot) {
   addInterval(() => {
-    if (!bot || !botState.connected) return;
+    if (!bot || !botState.connected || botState.commanderBusy) return;
     try {
       const yaw = Math.random() * Math.PI * 2 - Math.PI;
       const pitch = (Math.random() * Math.PI) / 2 - Math.PI / 4;

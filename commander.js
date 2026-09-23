@@ -2,16 +2,46 @@
 
 // ============================================================
 // COMMANDER MODULE
-// Lets one trusted "owner" player control the bot in chat:
-// mine blocks, walk to a spot, follow, and build simple
-// structures using creative-mode block placement.
+// Lets one trusted "owner" player control the bot in chat using
+// loose natural phrasing (no strict "!command" syntax required):
+// mine blocks, walk to a spot, follow, build simple structures,
+// and build a pagoda-style house/village.
 // ============================================================
 
 const { Vec3 } = require("vec3");
 const { Movements, goals } = require("mineflayer-pathfinder");
 const { GoalNear, GoalFollow, GoalBlock } = goals;
+const villageBuilder = require("./village");
 
-function commanderModule(bot, mcData, defaultMove, config, addLog) {
+// Words to ignore when picking out the meaningful parts of a sentence.
+const FILLERS = new Set([
+  "a", "an", "the", "please", "pls", "plz", "to", "for", "me", "now",
+  "kindly", "my", "some", "just", "can", "you", "could", "would", "also",
+  "then", "and", "with", "of", "up", "one", "style", "styled", "themed",
+  "type", "kind", "out", "little", "small",
+]);
+
+// The first meaningful word of the sentence decides which command runs.
+const ACTION_SYNONYMS = {
+  help: ["help", "commands", "command"],
+  stop: ["stop", "cancel", "halt", "quit", "wait"],
+  creative: ["creative"],
+  come: ["come"],
+  follow: ["follow"],
+  goto: ["goto", "go", "walk", "move", "head"],
+  mine: ["mine", "dig", "break", "harvest", "chop", "get", "collect"],
+  give: ["give"],
+  build: ["build", "make", "construct", "create"],
+};
+
+function classifyAction(firstWord) {
+  for (const [canonical, words] of Object.entries(ACTION_SYNONYMS)) {
+    if (words.includes(firstWord)) return canonical;
+  }
+  return null;
+}
+
+function commanderModule(bot, mcData, defaultMove, config, addLog, botState) {
   const ownerName = (config.owner || "").toLowerCase().trim();
   if (!ownerName) {
     addLog("[Commander] No owner set in settings.json - module disabled.");
@@ -26,7 +56,11 @@ function commanderModule(bot, mcData, defaultMove, config, addLog) {
 
   let cancelRequested = false;
   let busy = false;
-  let followInterval = null;
+
+  function setBusy(value) {
+    busy = value;
+    if (botState) botState.commanderBusy = value;
+  }
 
   function say(msg) {
     if (bot && bot.chat) bot.chat(msg);
@@ -34,10 +68,7 @@ function commanderModule(bot, mcData, defaultMove, config, addLog) {
 
   function stopEverything() {
     cancelRequested = true;
-    if (followInterval) {
-      clearInterval(followInterval);
-      followInterval = null;
-    }
+    setBusy(false);
     try {
       bot.pathfinder.stop();
       bot.pathfinder.setGoal(null);
@@ -48,10 +79,10 @@ function commanderModule(bot, mcData, defaultMove, config, addLog) {
 
   async function withTask(fn) {
     if (busy) {
-      say("I'm already doing something - send !stop first if you want to cancel it.");
+      say("I'm already doing something - say stop first if you want to cancel it.");
       return;
     }
-    busy = true;
+    setBusy(true);
     cancelRequested = false;
     try {
       await fn();
@@ -59,7 +90,7 @@ function commanderModule(bot, mcData, defaultMove, config, addLog) {
       addLog(`[Commander] Task error: ${e.message}`);
       say(`Something went wrong: ${e.message}`);
     } finally {
-      busy = false;
+      setBusy(false);
     }
   }
 
@@ -69,9 +100,10 @@ function commanderModule(bot, mcData, defaultMove, config, addLog) {
 
   // ---------- HELP ----------
   function sendHelp() {
-    say("Commands: !help !mine <block> [count] !mine this !goto x y z !come !follow !stop");
-    say("!build box w h d [block] [hollow] | !build wall len h [block] | !build tower h [block] | !build platform w d [block]");
-    say("!give <item> [count] (creative only) | !creative");
+    say("Just talk to me normally, no ! needed. Examples:");
+    say("'mine 10 stone' / 'mine this' / 'go to 100 65 200' / 'come here' / 'follow me' / 'stop'");
+    say("'build a tower 10 cobblestone' / 'build a wall 8 3' / 'build a box 5 4 5 hollow'");
+    say("'build a house chinese style' / 'build a village chinese 5 villagers' / 'give me a diamond_block' / 'creative'");
   }
 
   // ---------- MINING ----------
@@ -121,7 +153,7 @@ function commanderModule(bot, mcData, defaultMove, config, addLog) {
     }
     const block = bot.blockAtEntityCursor(player.entity, 24);
     if (!block || block.name === "air") {
-      say("I can't tell which block you're looking at - try !mine <blockname> instead.");
+      say("I can't tell which block you're looking at - try naming it instead, like 'mine stone'.");
       return;
     }
     try {
@@ -165,9 +197,11 @@ function commanderModule(bot, mcData, defaultMove, config, addLog) {
       say("I can't see you - come closer first.");
       return;
     }
+    setBusy(true);
+    cancelRequested = false;
     bot.pathfinder.setMovements(taskMove);
     bot.pathfinder.setGoal(new GoalFollow(player.entity, 2), true);
-    say("Following you - send !stop to make me quit following.");
+    say("Following you - say stop when you want me to quit.");
   }
 
   // ---------- CREATIVE BUILDING ----------
@@ -175,7 +209,7 @@ function commanderModule(bot, mcData, defaultMove, config, addLog) {
     const itemDef = mcData.itemsByName[blockName] || mcData.blocksByName[blockName];
     if (!itemDef) throw new Error(`unknown block/item "${blockName}"`);
     if (bot.game.gameMode !== "creative") {
-      throw new Error("I need to be in creative mode for this - try !creative first (needs OP)");
+      throw new Error("I need to be in creative mode for this - say 'creative' first (needs OP)");
     }
     const Item = require("prismarine-item")(bot.registry);
     const item = new Item(itemDef.id, 64);
@@ -281,115 +315,176 @@ function commanderModule(bot, mcData, defaultMove, config, addLog) {
     if (!cancelRequested) say("Box done.");
   }
 
-  // ---------- COMMAND PARSER ----------
-  async function handleCommand(username, raw) {
-    const body = raw.slice(1).trim(); // strip leading "!"
-    const lower = body.toLowerCase();
-    const parts = body.split(/\s+/);
-    const cmd = (parts[0] || "").toLowerCase();
+  // ---------- STYLED (PAGODA / "CHINESE MONASTERY" LOOK) BUILDING ----------
+  // These use /fill and /setblock (via villageBuilder) instead of placing
+  // blocks one at a time - much faster and more reliable for a whole house
+  // or village, but it means the bot's account MUST be OP on the server
+  // (vanilla restricts /fill, /setblock and /summon to operators).
+  async function buildPagodaHouse(originX, originY, originZ, width, depth, wallHeight) {
+    const cmds = villageBuilder.chineseHouseCommands(originX, originY, originZ, { width, depth, wallHeight });
+    say(`Building a ${width}x${depth} pagoda-style house (${cmds.length} commands) - the bot needs to be OP for this to work...`);
+    await villageBuilder.runCommands(bot, cmds, {
+      delayMs: 250,
+      isCancelled: () => cancelRequested,
+    });
+    if (!cancelRequested) say("Pagoda house commands sent. If nothing appeared, make sure the bot's account is OP'd.");
+  }
 
-    if (cmd === "help") return sendHelp();
+  async function buildVillage(count, spawnVillagers) {
+    count = Math.max(1, Math.min(count, 9));
+    const p = bot.entity.position.floored();
+    const { commands, houses } = villageBuilder.chineseVillageCommands(p.x, p.y, p.z, count, {});
+    say(`Laying out a ${count}-house pagoda village (${commands.length} commands) - the bot needs to be OP for this to work...`);
+    await villageBuilder.runCommands(bot, commands, {
+      delayMs: 250,
+      isCancelled: () => cancelRequested,
+    });
+    if (spawnVillagers && !cancelRequested) {
+      say("Spawning villagers...");
+      const vcmds = villageBuilder.villagerSpawnCommands(houses, 1);
+      await villageBuilder.runCommands(bot, vcmds, {
+        delayMs: 300,
+        isCancelled: () => cancelRequested,
+      });
+    }
+    if (!cancelRequested) say(`Village of ${count} houses sent. If nothing appeared, make sure the bot's account is OP'd.`);
+  }
 
-    if (cmd === "stop" || cmd === "cancel") {
+  // ---------- NATURAL-LANGUAGE COMMAND PARSER ----------
+  // No "!" prefix required. The FIRST meaningful word of the message must be
+  // a recognized action word (see ACTION_SYNONYMS) or the message is treated
+  // as ordinary chat and ignored. Everything after that is parsed loosely:
+  // filler words are dropped, numbers are pulled out in order regardless of
+  // what's between them, and the first leftover word is taken as a block/
+  // item/shape name. This lets things like "build me a house chinese style"
+  // or "mine 5 stone please" work without exact syntax.
+  async function handleCommand(username, rawMessage) {
+    let text = rawMessage.trim();
+    if (text.startsWith("!")) text = text.slice(1); // still allow the old "!" prefix
+    const cleaned = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ");
+    const allTokens = cleaned.split(/\s+/).filter(Boolean);
+    if (allTokens.length === 0) return;
+
+    const action = classifyAction(allTokens[0]);
+    if (!action) return; // ordinary chat, not a command - stay quiet
+
+    const rest = allTokens.slice(1).filter((t) => !FILLERS.has(t));
+    const numbers = rest.filter((t) => /^\d+$/.test(t)).map(Number);
+    const words = rest.filter((t) => !/^\d+$/.test(t));
+    const hollow = rest.includes("hollow");
+    const wantsVillagers = rest.some((t) => t.startsWith("villager"));
+
+    if (action === "help") return sendHelp();
+
+    if (action === "stop") {
       stopEverything();
-      say("Stopped.");
+      say("Stopped - back to wandering around.");
       return;
     }
 
-    if (cmd === "creative") {
+    if (action === "creative") {
       bot.chat("/gamemode creative");
       say("Requested creative mode (needs OP on the server).");
       return;
     }
 
-    if (cmd === "come") {
+    if (action === "come") {
       return withTask(() => comeToOwner(username));
     }
 
-    if (cmd === "follow") {
+    if (action === "follow") {
       return followOwner(username);
     }
 
-    if (cmd === "goto") {
-      const [, xs, ys, zs] = parts;
-      const x = parseInt(xs, 10), y = parseInt(ys, 10), z = parseInt(zs, 10);
-      if ([x, y, z].some(Number.isNaN)) {
-        say("Usage: !goto <x> <y> <z>");
+    if (action === "goto") {
+      const [x, y, z] = numbers;
+      if ([x, y, z].some((n) => n === undefined || Number.isNaN(n))) {
+        say("Tell me where, like: go to 100 65 200");
         return;
       }
       return withTask(() => goTo(x, y, z));
     }
 
-    if (cmd === "mine") {
-      if (lower.includes("this") || lower.includes("that") || parts.length === 1) {
+    if (action === "mine") {
+      if (words.includes("this") || words.includes("that") || words.includes("here") || words.length === 0) {
         return withTask(() => mineBlockPlayerLooksAt(username));
       }
-      const blockName = parts[1];
-      const count = parts[2] ? parseInt(parts[2], 10) : 1;
-      if (!blockName || Number.isNaN(count) || count < 1) {
-        say("Usage: !mine <blockname> [count]  or  !mine this");
-        return;
-      }
-      return withTask(() => mineBlockByName(blockName.toLowerCase(), Math.min(count, 64)));
+      const blockName = words[0];
+      const count = Math.min(Math.max(numbers[0] || 1, 1), 64);
+      return withTask(() => mineBlockByName(blockName, count));
     }
 
-    if (cmd === "give") {
-      const itemName = parts[1];
+    if (action === "give") {
+      const itemName = words[0];
       if (!itemName) {
-        say("Usage: !give <item> [count]");
+        say("What should I give myself? e.g. 'give diamond_block'");
         return;
       }
       return withTask(async () => {
-        await equipCreativeBlock(itemName.toLowerCase());
+        await equipCreativeBlock(itemName);
         say(`Equipped ${itemName}.`);
       });
     }
 
-    if (cmd === "build") {
-      const shape = (parts[1] || "").toLowerCase();
+    if (action === "build") {
+      const shape = (words[0] || "").replace(/s$/, ""); // de-pluralize: houses -> house
+      const shapeWords = ["tower", "wall", "platform", "box", "house", "home", "cottage", "village"];
+      const extraWords = words.slice(1).filter((w) => !shapeWords.includes(w));
+      const p = bot.entity.position.floored();
+
       return withTask(async () => {
         if (shape === "tower") {
-          const height = parseInt(parts[2], 10) || 5;
-          const blockName = (parts[3] || "cobblestone").toLowerCase();
-          await buildTower(height, blockName);
+          const height = numbers[0] || 5;
+          await buildTower(height, extraWords[0] || "cobblestone");
         } else if (shape === "wall") {
-          const length = parseInt(parts[2], 10) || 5;
-          const height = parseInt(parts[3], 10) || 3;
-          const blockName = (parts[4] || "cobblestone").toLowerCase();
-          await buildWall(length, height, blockName);
+          const length = numbers[0] || 5;
+          const height = numbers[1] || 3;
+          await buildWall(length, height, extraWords[0] || "cobblestone");
         } else if (shape === "platform") {
-          const width = parseInt(parts[2], 10) || 5;
-          const depth = parseInt(parts[3], 10) || 5;
-          const blockName = (parts[4] || "cobblestone").toLowerCase();
-          await buildPlatform(width, depth, blockName);
-        } else if (shape === "box" || shape === "house") {
-          const width = parseInt(parts[2], 10) || 5;
-          const height = parseInt(parts[3], 10) || 4;
-          const depth = parseInt(parts[4], 10) || 5;
-          const blockName = (parts[5] || "cobblestone").toLowerCase();
-          const hollow = lower.includes("hollow");
-          await buildBox(width, height, depth, blockName, hollow);
+          const width = numbers[0] || 5;
+          const depth = numbers[1] || width;
+          await buildPlatform(width, depth, extraWords[0] || "cobblestone");
+        } else if (shape === "box") {
+          const width = numbers[0] || 5;
+          const height = numbers[1] || 4;
+          const depth = numbers[2] || 5;
+          await buildBox(width, height, depth, extraWords[0] || "cobblestone", hollow);
+        } else if (shape === "house" || shape === "home" || shape === "cottage") {
+          const isStyled = extraWords.some((w) =>
+            ["chinese", "china", "pagoda", "asian", "monastery", "temple"].includes(w)
+          );
+          if (isStyled) {
+            const width = numbers[0] || 6;
+            const depth = numbers[1] || 6;
+            const height = numbers[2] || 4;
+            await buildPagodaHouse(p.x, p.y, p.z, width, depth, height);
+          } else {
+            const width = numbers[0] || 5;
+            const height = numbers[1] || 4;
+            const depth = numbers[2] || 5;
+            await buildBox(width, height, depth, extraWords[0] || "cobblestone", hollow);
+          }
+        } else if (shape === "village") {
+          const count = numbers[0] || 4;
+          await buildVillage(count, wantsVillagers);
         } else {
-          say("Usage: !build box|wall|tower|platform <dimensions> [block] [hollow]");
+          say("I can build: tower, wall, platform, box, house (try saying 'chinese style'), or village.");
         }
       });
     }
-
-    say(`Unknown command "${cmd}". Send !help for the list.`);
   }
 
   // ---------- CHAT LISTENER ----------
   bot.on("chat", (username, message) => {
     if (username === bot.username) return;
     if (username.toLowerCase() !== ownerName) return;
-    if (!message.startsWith("!")) return;
 
     handleCommand(username, message.trim()).catch((e) => {
       addLog(`[Commander] Unhandled error: ${e.message}`);
     });
   });
 
-  addLog(`[Commander] Ready - listening for "!" commands from ${config.owner}.`);
+  addLog(`[Commander] Ready - understanding natural commands from ${config.owner}.`);
 }
 
 module.exports = { commanderModule };

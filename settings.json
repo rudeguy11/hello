@@ -6,10 +6,10 @@
     "type": "offline"
   },
   "server": {
-    "ip": "oneblocksurviva-VWKW.aternos.me",
-    "port": 62776,
+    "ip": "solocloud.host",
+    "port": 25565,
     "version": "1.20.1",
-    "try-creative": true
+    "try-creative": false
   },
   "owner": "rudegu_y",
   "position": {

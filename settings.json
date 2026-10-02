@@ -6,8 +6,8 @@
     "type": "offline"
   },
   "server": {
-    "ip": "oneblocksurviva-VWKW.aternos.me",
-    "port": 62776,
+    "ip": "aslserver1.aternos.me",
+    "port": 38455,
     "version": "1.20.1",
     "try-creative": false
   },
